@@ -1,6 +1,12 @@
 name: Build Hatari (libretro) on macOS
 
-on: [push, pull_request]
+on:
+  # The demarc branch has its own core workflow (libretro.yml) and does
+  # not build the upstream targets.
+  push:
+    branches-ignore: [demarc]
+  pull_request:
+    branches-ignore: [demarc]
 
 env:
   core_id: hatari_libretro
