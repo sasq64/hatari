@@ -195,12 +195,11 @@ RETRO_API void retro_init(void)
 
 		Main_Init(3, argv);
 
-		return;
-	}
-
-	argv[0] = name;
-	argv[1] = NULL;
-	Main_Init(1, (char **)argv);
+	} else {
+        argv[0] = name;
+        argv[1] = NULL;
+        Main_Init(1, (char **)argv);
+    }
 
 	/* Apply core options on top of defaults/loaded config */
 	Core_ApplyBootOptions();

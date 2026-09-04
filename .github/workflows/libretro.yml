@@ -1,0 +1,294 @@
+name: libretro core
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [demarc]
+    paths-ignore:
+      - '**.md'
+      - 'readme.txt'
+      - 'doc/**'
+      - 'python-ui/**'
+      - '.github/ISSUE_TEMPLATE/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# The core is the only thing built here: ENABLE_HATARI=OFF drops the SDL
+# frontend, so nothing but the shared module comes out of the tree, and zlib is
+# statically linked (ENABLE_STATIC_ZLIB) so the core carries no library
+# dependency beyond the C/C++ runtime.
+env:
+  CMAKE_FLAGS: >-
+    -DENABLE_LIBRETRO=ON
+    -DENABLE_HATARI=OFF
+    -DENABLE_TOOLS=OFF
+    -DENABLE_STATIC_ZLIB=ON
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+jobs:
+  linux-x86_64:
+    name: Linux x86_64
+    # Oldest supported runner, so the core links against an older glibc and
+    # stays loadable on the widest range of RetroArch installs.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+
+      # SDL is not linked into the core, but the shared Hatari sources still
+      # include its headers, so the dev package has to be present to compile.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libsdl2-dev file
+
+      - name: Build core
+        run: |
+          cmake -S . -B build $CMAKE_FLAGS -DENABLE_STATIC_CAPSIMAGE=ON
+          cmake --build build -j"$(nproc)"
+
+      - name: Stage core
+        run: cp share/libretro/info/libretro-hatari.info build/src/hatari_libretro.info
+
+      - name: Inspect core
+        run: |
+          cd build/src
+          file hatari_libretro.so
+          ls -l hatari_libretro.so
+          # A core that links but exports no entry points loads and then does
+          # nothing, so check for one of them rather than just for the file.
+          nm -D --defined-only hatari_libretro.so | grep -q ' T retro_run'
+          # CapsImg is statically linked in, so .ipf/.ctr images work.
+          nm -D --defined-only hatari_libretro.so | grep -q 'CAPSLockImage'
+          cat hatari_libretro.info
+
+      - name: Upload core
+        uses: actions/upload-artifact@v7
+        with:
+          name: hatari_libretro-linux-x86_64
+          path: |
+            build/src/hatari_libretro.so
+            build/src/hatari_libretro.info
+          if-no-files-found: error
+
+  macos-arm64:
+    name: macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: brew install sdl2 || true
+
+      - name: Build core
+        run: |
+          cmake -S . -B build $CMAKE_FLAGS \
+            -DENABLE_STATIC_CAPSIMAGE=ON \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Stage core
+        run: cp share/libretro/info/libretro-hatari.info build/src/hatari_libretro.info
+
+      - name: Inspect core
+        run: |
+          cd build/src
+          file hatari_libretro.dylib
+          ls -l hatari_libretro.dylib
+          # Fail on a stray x86_64 slice as well as on a core with no entry points.
+          lipo -info hatari_libretro.dylib | grep -q 'arm64'
+          nm -gU hatari_libretro.dylib | grep -q '_retro_run'
+          nm -gU hatari_libretro.dylib | grep -q 'CAPSLockImage'
+          cat hatari_libretro.info
+
+      - name: Upload core
+        uses: actions/upload-artifact@v7
+        with:
+          name: hatari_libretro-macos-arm64
+          path: |
+            build/src/hatari_libretro.dylib
+            build/src/hatari_libretro.info
+          if-no-files-found: error
+
+  windows-x64:
+    name: Windows x64
+    # Cross-compiled rather than built under MSYS2, which is what the tree's
+    # own Windows core workflow does and keeps the build times in line with
+    # the other two jobs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config mingw-w64 binutils-mingw-w64
+
+      # CapsImg is left out here: its sources do not cross-compile, so the
+      # Windows core has no .ipf/.ctr support. Everything else matches the
+      # other two platforms.
+      #
+      # -static drags libgcc, libstdc++ and libwinpthread into the DLL, which
+      # otherwise would have to be shipped next to it. MODULE_LINKER_FLAGS is
+      # the one that applies — the core is an add_library(... MODULE).
+      - name: Build core
+        run: |
+          cmake -S . -B build $CMAKE_FLAGS \
+            -DENABLE_STATIC_CAPSIMAGE=OFF \
+            -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+            -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
+            -DCMAKE_FIND_ROOT_PATH=/usr/x86_64-w64-mingw32 \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            -DCMAKE_MODULE_LINKER_FLAGS="-static-libgcc -static-libstdc++ -static" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++ -static"
+          cmake --build build -j"$(nproc)"
+
+      - name: Stage core
+        run: cp share/libretro/info/libretro-hatari.info build/src/hatari_libretro.info
+
+      - name: Inspect core
+        run: |
+          cd build/src
+          file hatari_libretro.dll
+          ls -l hatari_libretro.dll
+          # The export table, not the symbol table, in case the DLL is stripped.
+          x86_64-w64-mingw32-objdump -p hatari_libretro.dll | grep -q 'retro_run'
+          # Nothing but system DLLs may be imported: a core that wants
+          # libgcc_s_seh-1.dll next to it fails to load for everyone.
+          x86_64-w64-mingw32-objdump -p hatari_libretro.dll | grep 'DLL Name'
+          if x86_64-w64-mingw32-objdump -p hatari_libretro.dll |
+               grep -Eiq 'DLL Name:.*(libgcc|libstdc\+\+|libwinpthread)'; then
+            echo "core imports a mingw runtime DLL" >&2
+            exit 1
+          fi
+          cat hatari_libretro.info
+
+      - name: Upload core
+        uses: actions/upload-artifact@v7
+        with:
+          name: hatari_libretro-windows-x64
+          path: |
+            build/src/hatari_libretro.dll
+            build/src/hatari_libretro.info
+          if-no-files-found: error
+
+  # Publishes the three cores to a rolling "latest" release, so the demarc app
+  # can fetch them from a URL that never changes. Both of these resolve to the
+  # newest successful build:
+  #   https://github.com/sasq64/hatari/releases/download/latest/<asset>
+  #   https://github.com/sasq64/hatari/releases/latest/download/<asset>
+  # manifest.json lists each zip with its size and sha256.
+  publish:
+    name: Publish rolling release
+    needs: [linux-x86_64, macos-arm64, windows-x64]
+    if: github.ref == 'refs/heads/demarc'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+
+      - name: Download built cores
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+
+      # One zip per platform, each holding the core under the plain name
+      # RetroArch expects (hatari_libretro.so/.dylib/.dll) plus the .info, so
+      # the app can unzip straight into its cores directory.
+      - name: Stage release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          zip_core() {
+            artifact="$1"
+            core="$2"
+            (cd "dist/$artifact" \
+              && zip -9 -X "$GITHUB_WORKSPACE/release/$artifact.zip" "$core" hatari_libretro.info)
+          }
+          zip_core hatari_libretro-linux-x86_64 hatari_libretro.so
+          zip_core hatari_libretro-macos-arm64 hatari_libretro.dylib
+          zip_core hatari_libretro-windows-x64 hatari_libretro.dll
+          ls -l release
+
+      - name: Write manifest.json
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, re, pathlib
+
+          # HATARI_VERSION is what the core reports through
+          # retro_get_system_info, and it ends in a __DATE__ the preprocessor
+          # fills in — keep just the version part.
+          version = "0.0.0"
+          m = re.search(r'^#define\s+HATARI_VERSION\s+"([^" (]+)',
+                        pathlib.Path("src/includes/version.h").read_text(),
+                        re.MULTILINE)
+          if m:
+              version = m.group(1)
+
+          assets = {
+              "linux-x86_64": ("hatari_libretro-linux-x86_64.zip", "hatari_libretro.so"),
+              "macos-arm64":  ("hatari_libretro-macos-arm64.zip", "hatari_libretro.dylib"),
+              "windows-x64":  ("hatari_libretro-windows-x64.zip", "hatari_libretro.dll"),
+          }
+          base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['RELEASE_TAG']}"
+
+          manifest = {
+              "version": version,
+              "commit": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "cores": {},
+          }
+          for platform, (name, core) in assets.items():
+              data = pathlib.Path("release", name).read_bytes()
+              manifest["cores"][platform] = {
+                  "file": name,
+                  "core": core,
+                  "url": f"{base}/{name}",
+                  "size": len(data),
+                  "sha256": hashlib.sha256(data).hexdigest(),
+              }
+
+          pathlib.Path("release/manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+          cat release/manifest.json
+
+      - name: Move the rolling tag
+        run: |
+          set -euo pipefail
+          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$RELEASE_TAG"
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          NOTES="Rolling libretro core build from \`$GITHUB_SHA\` — see manifest.json for versions and checksums."
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "libretro core (latest)" --notes "$NOTES" --latest
+          else
+            gh release create "$RELEASE_TAG" --title "libretro core (latest)" --notes "$NOTES" --latest
+          fi
+          gh release upload "$RELEASE_TAG" release/* --clobber
