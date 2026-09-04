@@ -134,17 +134,25 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config mingw-w64 binutils-mingw-w64
+          sudo apt-get install -y build-essential cmake pkg-config \
+            mingw-w64 binutils-mingw-w64 libz-mingw-w64-dev
 
       # CapsImg is left out here: its sources do not cross-compile, so the
       # Windows core has no .ipf/.ctr support. Everything else matches the
       # other two platforms.
+      #
+      # ENABLE_STATIC_ZLIB builds the library but adds no include path, so
+      # zlib.h still has to come from the sysroot (libz-mingw-w64-dev) — the
+      # other two jobs get it from the host's /usr/include.
       #
       # -static drags libgcc, libstdc++ and libwinpthread into the DLL, which
       # otherwise would have to be shipped next to it. MODULE_LINKER_FLAGS is
       # the one that applies — the core is an add_library(... MODULE).
       - name: Build core
         run: |
+          export PKG_CONFIG_LIBDIR=/usr/x86_64-w64-mingw32/lib/pkgconfig
+          export PKG_CONFIG_PATH=/usr/x86_64-w64-mingw32/share/pkgconfig
+          export PKG_CONFIG_SYSROOT_DIR=/usr/x86_64-w64-mingw32
           cmake -S . -B build $CMAKE_FLAGS \
             -DENABLE_STATIC_CAPSIMAGE=OFF \
             -DCMAKE_SYSTEM_NAME=Windows \
