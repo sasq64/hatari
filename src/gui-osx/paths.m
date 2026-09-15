@@ -56,7 +56,8 @@ char *Paths_GetMacScreenShotDir(void)
 
 char *Paths_GetMacScreenShotDir(void)
 {
-	// no-op on libretro
+	// no-op on libretro; caller falls back to the working dir on NULL
+	return (char *)0;
 }
 
 #endif
